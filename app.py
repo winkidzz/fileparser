@@ -29,7 +29,7 @@ ALLOWED_EXTENSIONS = {'png', 'tiff', 'tif'}
 
 OLLAMA_API_URL = 'http://localhost:11434/api/generate'
 
-MULTIMODAL_MODELS = ['llava:latest', 'gemma3:27b-vision', 'llama3-vision:latest', 'llama3.2-vision:11b', 'qwen2.5vl:7b']  # Removed llama4-vision, added qwen2.5vl:7b
+MULTIMODAL_MODELS = ['llava:latest', 'gemma3:27b-vision', 'llama3-vision:latest', 'llama3.2-vision:11b', 'qwen2.5vl:7b', 'llama4:latest']  # Added llama4:latest for vision support
 
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-vision:generateContent'
@@ -199,7 +199,7 @@ def list_documents():
                                 f"{ocr_text}"
                             )
                             span.set_attribute("llm.request", req)
-                            resp = run_text_llm_inference(req, 'gemma3:27b')
+                            resp = run_text_llm_inference(req, 'gemma3:27b', OLLAMA_API_URL)
                             span.set_attribute("llm.response", resp)
                         elif combo == 'ocr_llama3':
                             ocr_text = run_ocr(filepath)
@@ -215,43 +215,121 @@ def list_documents():
                                 f"{ocr_text}"
                             )
                             span.set_attribute("llm.request", req)
-                            resp = run_text_llm_inference(req, 'llama3:8b')
+                            resp = run_text_llm_inference(req, 'llama3:8b', OLLAMA_API_URL)
                             span.set_attribute("llm.response", resp)
                         elif combo == 'img_gemma3':
-                            model_name = 'gemma3:27b'  # Update if you have a multimodal variant
+                            model_name = 'gemma3:27b-vision'
                             if model_name not in MULTIMODAL_MODELS:
                                 resp = 'Gemma3 does not support direct image input. Please use a multimodal model like LLaVA.'
+                                req = f"Attempted image inference with {model_name} on {filename}"
                             else:
                                 try:
-                                    image_b64 = run_llava_inference(filepath, OLLAMA_API_URL)
-                                    resp = image_b64
+                                    with open(filepath, 'rb') as img_file:
+                                        image_bytes = img_file.read()
+                                        image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                                    req = json.dumps({
+                                        'model': model_name,
+                                        'prompt': 'Describe the contents of this image and extract relevant fields as a markdown table.',
+                                        'image': '[base64 omitted]'
+                                    })
+                                    span.set_attribute("llm.request", req)
+                                    data = {
+                                        'model': model_name,
+                                        'prompt': 'Describe the contents of this image and extract relevant fields as a markdown table.',
+                                        'image': image_b64
+                                    }
+                                    response = requests.post(OLLAMA_API_URL, json=data, stream=True)
+                                    if response.ok:
+                                        result = ''
+                                        for line in response.iter_lines():
+                                            if line:
+                                                try:
+                                                    part = line.decode('utf-8')
+                                                    json_part = json.loads(part)
+                                                    result += json_part.get('response', '')
+                                                except Exception:
+                                                    continue
+                                        resp = result or 'No response from Gemma3.'
+                                    else:
+                                        resp = f"Error: {response.text}"
                                 except Exception as e:
                                     resp = f"Error: {e}"
-                            span.set_attribute("llm.request", f"Image inference on {filename}")
                             span.set_attribute("llm.response", resp)
                         elif combo == 'img_llama3':
-                            model_name = 'llama3.2-vision:11b'  # Use the multimodal Llama3 vision model
+                            model_name = 'llama3.2-vision:11b'
                             if model_name not in MULTIMODAL_MODELS:
                                 resp = 'Llama3 does not support direct image input. Please use a multimodal model like LLaVA.'
+                                req = f"Attempted image inference with {model_name} on {filename}"
                             else:
                                 try:
-                                    image_b64 = run_llava_inference(filepath, OLLAMA_API_URL)
-                                    resp = image_b64
+                                    with open(filepath, 'rb') as img_file:
+                                        image_bytes = img_file.read()
+                                        image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                                    req = json.dumps({
+                                        'model': model_name,
+                                        'prompt': 'Describe the contents of this image and extract relevant fields as a markdown table.',
+                                        'images': ['[base64 omitted]']
+                                    })
+                                    span.set_attribute("llm.request", req)
+                                    data = {
+                                        'model': model_name,
+                                        'prompt': 'Describe the contents of this image and extract relevant fields as a markdown table.',
+                                        'images': [image_b64]
+                                    }
+                                    response = requests.post(OLLAMA_API_URL, json=data, stream=True)
+                                    if response.ok:
+                                        result = ''
+                                        for line in response.iter_lines():
+                                            if line:
+                                                try:
+                                                    part = line.decode('utf-8')
+                                                    json_part = json.loads(part)
+                                                    result += json_part.get('response', '')
+                                                except Exception:
+                                                    continue
+                                        resp = result or 'No response from Llama3.'
+                                    else:
+                                        resp = f"Error: {response.text}"
                                 except Exception as e:
                                     resp = f"Error: {e}"
-                            span.set_attribute("llm.request", f"Image inference on {filename}")
                             span.set_attribute("llm.response", resp)
                         elif combo == 'img_qwen2':
                             model_name = 'qwen2.5vl:7b'
                             if model_name not in MULTIMODAL_MODELS:
                                 resp = 'Qwen2.5VL does not support direct image input.'
+                                req = f"Attempted image inference with {model_name} on {filename}"
                             else:
                                 try:
-                                    image_b64 = run_llava_inference(filepath, OLLAMA_API_URL)
-                                    resp = image_b64
+                                    with open(filepath, 'rb') as img_file:
+                                        image_bytes = img_file.read()
+                                        image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                                    req = json.dumps({
+                                        'model': model_name,
+                                        'prompt': 'Describe the contents of this image and extract relevant fields as a markdown table.',
+                                        'images': ['[base64 omitted]']
+                                    })
+                                    span.set_attribute("llm.request", req)
+                                    data = {
+                                        'model': model_name,
+                                        'prompt': 'Describe the contents of this image and extract relevant fields as a markdown table.',
+                                        'images': [image_b64]
+                                    }
+                                    response = requests.post(OLLAMA_API_URL, json=data, stream=True)
+                                    if response.ok:
+                                        result = ''
+                                        for line in response.iter_lines():
+                                            if line:
+                                                try:
+                                                    part = line.decode('utf-8')
+                                                    json_part = json.loads(part)
+                                                    result += json_part.get('response', '')
+                                                except Exception:
+                                                    continue
+                                        resp = result or 'No response from Qwen2.5VL.'
+                                    else:
+                                        resp = f"Error: {response.text}"
                                 except Exception as e:
                                     resp = f"Error: {e}"
-                            span.set_attribute("llm.request", f"Image inference on {filename}")
                             span.set_attribute("llm.response", resp)
                         elif combo == 'ocr_llama4':
                             ocr_text = run_ocr(filepath)
@@ -292,13 +370,39 @@ def list_documents():
                             model_name = 'llama4:latest'
                             if model_name not in MULTIMODAL_MODELS:
                                 resp = 'Llama4 does not support direct image input. Please use a multimodal model like LLaVA.'
+                                req = f"Attempted image inference with {model_name} on {filename}"
                             else:
                                 try:
-                                    image_b64 = run_llava_inference(filepath, OLLAMA_API_URL)
-                                    resp = image_b64
+                                    with open(filepath, 'rb') as img_file:
+                                        image_bytes = img_file.read()
+                                        image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                                    req = json.dumps({
+                                        'model': model_name,
+                                        'prompt': 'Extract all fields and tables from this document as markdown.',
+                                        'images': ['[base64 omitted]']
+                                    })
+                                    span.set_attribute("llm.request", req)
+                                    data = {
+                                        'model': model_name,
+                                        'prompt': 'Extract all fields and tables from this document as markdown.',
+                                        'images': [image_b64]
+                                    }
+                                    response = requests.post(OLLAMA_API_URL, json=data, stream=True)
+                                    if response.ok:
+                                        result = ''
+                                        for line in response.iter_lines():
+                                            if line:
+                                                try:
+                                                    part = line.decode('utf-8')
+                                                    json_part = json.loads(part)
+                                                    result += json_part.get('response', '')
+                                                except Exception:
+                                                    continue
+                                        resp = result or 'No response from Llama4.'
+                                    else:
+                                        resp = f"Error: {response.text}"
                                 except Exception as e:
                                     resp = f"Error: {e}"
-                            span.set_attribute("llm.request", f"Image inference on {filename}")
                             span.set_attribute("llm.response", resp)
                         elif combo in ('img_gemini_flash', 'img_gemini_pro'):
                             if not GEMINI_API_KEY:
@@ -374,6 +478,35 @@ def list_documents():
     else:
         right_resp = llm_responses.get(right_sel, '')
     return render_template_string('''
+        <style>
+            body {
+                color: #111;
+                background: #fff;
+            }
+            pre, p, h2, h3, label, select, option, input, a {
+                color: #111 !important;
+            }
+            pre {
+                background: #f8f8f8;
+            }
+            /* Dark mode support */
+            @media (prefers-color-scheme: dark) {
+                body {
+                    color: #eee;
+                    background: #181818;
+                }
+                pre, p, h2, h3, label, select, option, input, a {
+                    color: #eee !important;
+                }
+                pre {
+                    background: #232323;
+                }
+                input, select, option {
+                    background: #232323;
+                    border: 1px solid #444;
+                }
+            }
+        </style>
         <h1>Uploaded Documents</h1>
         <form method="post">
             <label>Select files:</label><br>
@@ -400,9 +533,9 @@ def list_documents():
             <div style="display: flex; gap: 2em;">
                 <div style="flex: 1;">
                     <h3>Request Sent to LLM</h3>
-                    <pre style="background: #f0f0f0; padding: 1em; border-radius: 5px; white-space: pre-wrap;">{{ r.request }}</pre>
+                    <pre style="background: inherit; padding: 1em; border-radius: 5px; white-space: pre-wrap;">{{ r.request }}</pre>
                     <h3>Parsed Response from LLM</h3>
-                    <pre style="background: #f8f8f8; padding: 1em; border-radius: 5px; white-space: pre-wrap;">{{ r.response|safe }}</pre>
+                    <pre style="background: inherit; padding: 1em; border-radius: 5px; white-space: pre-wrap;">{{ r.response|safe }}</pre>
                     {% if r.trace_id %}
                         <h3>Trace ID</h3>
                         <p>{{ r.trace_id }}</p>
@@ -433,11 +566,11 @@ def list_documents():
         <div style="display: flex; gap: 2em;">
             <div style="flex: 1;">
                 <h3>Left Parsed Response</h3>
-                <pre style="background: #f8f8f8; padding: 1em; border-radius: 5px; white-space: pre-wrap;">{{ left_resp|safe }}</pre>
+                <pre style="background: inherit; padding: 1em; border-radius: 5px; white-space: pre-wrap;">{{ left_resp|safe }}</pre>
             </div>
             <div style="flex: 1;">
                 <h3>Right Parsed Response</h3>
-                <pre style="background: #f8f8f8; padding: 1em; border-radius: 5px; white-space: pre-wrap;">{{ right_resp|safe }}</pre>
+                <pre style="background: inherit; padding: 1em; border-radius: 5px; white-space: pre-wrap;">{{ right_resp|safe }}</pre>
             </div>
         </div>
         {% endif %}
@@ -480,7 +613,7 @@ def parse_ocr_gemma3():
                 "Here is the OCR text:\n"
                 f"{ocr_text}"
             )
-            result = run_text_llm_inference(prompt, 'gemma3:27b')
+            result = run_text_llm_inference(prompt, 'gemma3:27b', OLLAMA_API_URL)
         # Display the image and the parsed result below
         return render_template_string('''
             <h2>Scanned Image</h2>
@@ -505,7 +638,7 @@ def parse_ocr_llama3():
         if not ocr_text:
             result = 'No text found in image.'
         else:
-            result = run_text_llm_inference(ocr_text, 'llama3:8b')
+            result = run_text_llm_inference(ocr_text, 'llama3:8b', OLLAMA_API_URL)
         return render_template_string('''
             <h2>OCR + Llama3 Result</h2>
             <pre>{{ result }}</pre>
