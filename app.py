@@ -14,6 +14,15 @@ from utils import allowed_file, run_llava_inference, run_text_llm_inference, run
 from collections import defaultdict
 import fakeredis
 import uuid
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, ConsoleSpanExporter
+
+# Set up OpenTelemetry tracing
+trace.set_tracer_provider(TracerProvider())
+tracer = trace.get_tracer(__name__)
+span_processor = SimpleSpanProcessor(ConsoleSpanExporter())
+trace.get_tracer_provider().add_span_processor(span_processor)
 
 UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'png', 'tiff', 'tif'}
@@ -161,167 +170,194 @@ def list_documents():
                 if cached:
                     cached_obj = json.loads(cached)
                     req, resp = cached_obj['request'], cached_obj['response']
+                    trace_id = cached_obj.get('trace_id')
                 else:
-                    req, resp = '', ''
-                    if combo == 'ocr':
-                        req = f"OCR on {filename}"
-                        resp = run_ocr(filepath)
-                    elif combo == 'llava':
-                        req = f"LLaVA inference on {filename}"
-                        resp = run_llava_inference(filepath, OLLAMA_API_URL)
-                    elif combo == 'ocr_gemma3':
-                        ocr_text = run_ocr(filepath)
-                        req = (
-                            "You are an expert at reading scanned medical lab forms. "
-                            "Given the following OCR-extracted text from a scanned form, extract the following fields as accurately as possible: "
-                            "Patient ID, Lab ID, Patient Name, Date, Test Name, Result, Reference Range, Doctor Name. "
-                            "For each field, if the value is not found, leave it blank. "
-                            "Do not swap field names and values, and do not guess. "
-                            "Present the results as a markdown table with columns: Field, Value. "
-                            "If you find extra fields, add them as additional rows. "
-                            "Here is the OCR text:\n"
-                            f"{ocr_text}"
-                        )
-                        resp = run_text_llm_inference(req, 'gemma3:27b')
-                    elif combo == 'ocr_llama3':
-                        ocr_text = run_ocr(filepath)
-                        req = (
-                            "You are an expert at reading scanned medical lab forms. "
-                            "Given the following OCR-extracted text from a scanned form, extract the following fields as accurately as possible: "
-                            "Patient ID, Lab ID, Patient Name, Date, Test Name, Result, Reference Range, Doctor Name. "
-                            "For each field, if the value is not found, leave it blank. "
-                            "Do not swap field names and values, and do not guess. "
-                            "Present the results as a markdown table with columns: Field, Value. "
-                            "If you find extra fields, add them as additional rows. "
-                            "Here is the OCR text:\n"
-                            f"{ocr_text}"
-                        )
-                        resp = run_text_llm_inference(req, 'llama3:8b')
-                    elif combo == 'img_gemma3':
-                        model_name = 'gemma3:27b'  # Update if you have a multimodal variant
-                        if model_name not in MULTIMODAL_MODELS:
-                            resp = 'Gemma3 does not support direct image input. Please use a multimodal model like LLaVA.'
-                        else:
-                            try:
-                                image_b64 = run_llava_inference(filepath, OLLAMA_API_URL)
-                                resp = image_b64
-                            except Exception as e:
-                                resp = f"Error: {e}"
-                    elif combo == 'img_llama3':
-                        model_name = 'llama3.2-vision:11b'  # Use the multimodal Llama3 vision model
-                        if model_name not in MULTIMODAL_MODELS:
-                            resp = 'Llama3 does not support direct image input. Please use a multimodal model like LLaVA.'
-                        else:
-                            try:
-                                image_b64 = run_llava_inference(filepath, OLLAMA_API_URL)
-                                resp = image_b64
-                            except Exception as e:
-                                resp = f"Error: {e}"
-                    elif combo == 'img_qwen2':
-                        model_name = 'qwen2.5vl:7b'
-                        if model_name not in MULTIMODAL_MODELS:
-                            resp = 'Qwen2.5VL does not support direct image input.'
-                        else:
-                            try:
-                                image_b64 = run_llava_inference(filepath, OLLAMA_API_URL)
-                                resp = image_b64
-                            except Exception as e:
-                                resp = f"Error: {e}"
-                    elif combo == 'ocr_llama4':
-                        ocr_text = run_ocr(filepath)
-                        if not ocr_text:
-                            resp = 'No text found in image.'
-                        else:
-                            prompt = (
-                                "You are an expert at reading scanned forms. "
-                                "Given the following OCR-extracted text from a scanned form, extract all relevant fields and values, "
-                                "and present them as a markdown table. If the form has sections, use them as table headers. "
-                                "If the data is not tabular, present it in a clear, structured way.\n\n"
+                    req, resp, trace_id = '', '', None
+                    with tracer.start_as_current_span(f"LLM-{combo}") as span:
+                        span.set_attribute("filename", filename)
+                        if combo == 'ocr':
+                            req = f"OCR on {filename}"
+                            span.set_attribute("llm.request", req)
+                            resp = run_ocr(filepath)
+                            span.set_attribute("llm.response", resp)
+                        elif combo == 'llava':
+                            req = f"LLaVA inference on {filename}"
+                            span.set_attribute("llm.request", req)
+                            resp = run_llava_inference(filepath, OLLAMA_API_URL)
+                            span.set_attribute("llm.response", resp)
+                        elif combo == 'ocr_gemma3':
+                            ocr_text = run_ocr(filepath)
+                            req = (
+                                "You are an expert at reading scanned medical lab forms. "
+                                "Given the following OCR-extracted text from a scanned form, extract the following fields as accurately as possible: "
+                                "Patient ID, Lab ID, Patient Name, Date, Test Name, Result, Reference Range, Doctor Name. "
+                                "For each field, if the value is not found, leave it blank. "
+                                "Do not swap field names and values, and do not guess. "
+                                "Present the results as a markdown table with columns: Field, Value. "
+                                "If you find extra fields, add them as additional rows. "
+                                "Here is the OCR text:\n"
                                 f"{ocr_text}"
                             )
-                            data = {
-                                'model': 'llama4:latest',
-                                'prompt': prompt
-                            }
-                            try:
-                                response = requests.post(OLLAMA_API_URL, json=data, stream=True)
-                                if response.ok:
-                                    result = ''
-                                    for line in response.iter_lines():
-                                        if line:
-                                            try:
-                                                part = line.decode('utf-8')
-                                                json_part = json.loads(part)
-                                                result += json_part.get('response', '')
-                                            except Exception:
-                                                continue
-                                    resp = result or 'No response from Llama4.'
-                                else:
-                                    resp = f"Error: {response.text}"
-                            except Exception as e:
-                                resp = f"Error during LLM inference: {str(e)}"
-                    elif combo == 'img_llama4':
-                        model_name = 'llama4:latest'
-                        if model_name not in MULTIMODAL_MODELS:
-                            resp = 'Llama4 does not support direct image input. Please use a multimodal model like LLaVA.'
-                        else:
-                            try:
-                                image_b64 = run_llava_inference(filepath, OLLAMA_API_URL)
-                                resp = image_b64
-                            except Exception as e:
-                                resp = f"Error: {e}"
-                    elif combo in ('img_gemini_flash', 'img_gemini_pro'):
-                        if not GEMINI_API_KEY:
-                            resp = 'Gemini API key not set.'
-                        else:
-                            # If TIFF, convert to PNG for Gemini
-                            ext = os.path.splitext(filepath)[1].lower()
-                            temp_png_path = None
-                            if ext in ['.tiff', '.tif']:
-                                temp_png_path = convert_tiff_to_png(filepath)
-                                image_path_for_gemini = temp_png_path
+                            span.set_attribute("llm.request", req)
+                            resp = run_text_llm_inference(req, 'gemma3:27b')
+                            span.set_attribute("llm.response", resp)
+                        elif combo == 'ocr_llama3':
+                            ocr_text = run_ocr(filepath)
+                            req = (
+                                "You are an expert at reading scanned medical lab forms. "
+                                "Given the following OCR-extracted text from a scanned form, extract the following fields as accurately as possible: "
+                                "Patient ID, Lab ID, Patient Name, Date, Test Name, Result, Reference Range, Doctor Name. "
+                                "For each field, if the value is not found, leave it blank. "
+                                "Do not swap field names and values, and do not guess. "
+                                "Present the results as a markdown table with columns: Field, Value. "
+                                "If you find extra fields, add them as additional rows. "
+                                "Here is the OCR text:\n"
+                                f"{ocr_text}"
+                            )
+                            span.set_attribute("llm.request", req)
+                            resp = run_text_llm_inference(req, 'llama3:8b')
+                            span.set_attribute("llm.response", resp)
+                        elif combo == 'img_gemma3':
+                            model_name = 'gemma3:27b'  # Update if you have a multimodal variant
+                            if model_name not in MULTIMODAL_MODELS:
+                                resp = 'Gemma3 does not support direct image input. Please use a multimodal model like LLaVA.'
                             else:
-                                image_path_for_gemini = filepath
-                            try:
-                                mime_type = get_mime_type(image_path_for_gemini)
-                                with open(image_path_for_gemini, 'rb') as img_file:
-                                    image_bytes = img_file.read()
-                                    image_b64 = base64.b64encode(image_bytes).decode('utf-8')
-                                headers = {'Content-Type': 'application/json'}
-                                params = {'key': GEMINI_API_KEY}
+                                try:
+                                    image_b64 = run_llava_inference(filepath, OLLAMA_API_URL)
+                                    resp = image_b64
+                                except Exception as e:
+                                    resp = f"Error: {e}"
+                            span.set_attribute("llm.request", f"Image inference on {filename}")
+                            span.set_attribute("llm.response", resp)
+                        elif combo == 'img_llama3':
+                            model_name = 'llama3.2-vision:11b'  # Use the multimodal Llama3 vision model
+                            if model_name not in MULTIMODAL_MODELS:
+                                resp = 'Llama3 does not support direct image input. Please use a multimodal model like LLaVA.'
+                            else:
+                                try:
+                                    image_b64 = run_llava_inference(filepath, OLLAMA_API_URL)
+                                    resp = image_b64
+                                except Exception as e:
+                                    resp = f"Error: {e}"
+                            span.set_attribute("llm.request", f"Image inference on {filename}")
+                            span.set_attribute("llm.response", resp)
+                        elif combo == 'img_qwen2':
+                            model_name = 'qwen2.5vl:7b'
+                            if model_name not in MULTIMODAL_MODELS:
+                                resp = 'Qwen2.5VL does not support direct image input.'
+                            else:
+                                try:
+                                    image_b64 = run_llava_inference(filepath, OLLAMA_API_URL)
+                                    resp = image_b64
+                                except Exception as e:
+                                    resp = f"Error: {e}"
+                            span.set_attribute("llm.request", f"Image inference on {filename}")
+                            span.set_attribute("llm.response", resp)
+                        elif combo == 'ocr_llama4':
+                            ocr_text = run_ocr(filepath)
+                            if not ocr_text:
+                                resp = 'No text found in image.'
+                            else:
+                                prompt = (
+                                    "You are an expert at reading scanned forms. "
+                                    "Given the following OCR-extracted text from a scanned form, extract all relevant fields and values, "
+                                    "and present them as a markdown table. If the form has sections, use them as table headers. "
+                                    "If the data is not tabular, present it in a clear, structured way.\n\n"
+                                    f"{ocr_text}"
+                                )
                                 data = {
-                                    'contents': [
-                                        {
-                                            'parts': [
-                                                {'text': 'Extract all fields and tables from this document as markdown.'},
-                                                {'inlineData': {'mimeType': mime_type, 'data': image_b64}}
-                                            ]
-                                        }
-                                    ]
+                                    'model': 'llama4:latest',
+                                    'prompt': prompt
                                 }
-                                api_url = GEMINI_FLASH_API_URL if combo == 'img_gemini_flash' else GEMINI_PRO_API_URL
-                                response = requests.post(api_url, headers=headers, params=params, json=data)
-                                label = combinations[[c[0] for c in combinations].index(combo)][1]
-                                if response.ok:
-                                    try:
-                                        gemini_result = response.json()['candidates'][0]['content']['parts'][0]['text']
-                                    except Exception:
-                                        gemini_result = response.text
-                                    resp = gemini_result
+                                try:
+                                    response = requests.post(OLLAMA_API_URL, json=data, stream=True)
+                                    if response.ok:
+                                        result = ''
+                                        for line in response.iter_lines():
+                                            if line:
+                                                try:
+                                                    part = line.decode('utf-8')
+                                                    json_part = json.loads(part)
+                                                    result += json_part.get('response', '')
+                                                except Exception:
+                                                    continue
+                                        resp = result or 'No response from Llama4.'
+                                    else:
+                                        resp = f"Error: {response.text}"
+                                except Exception as e:
+                                    resp = f"Error during LLM inference: {str(e)}"
+                            span.set_attribute("llm.request", f"OCR + Llama4 on {filename}")
+                            span.set_attribute("llm.response", resp)
+                        elif combo == 'img_llama4':
+                            model_name = 'llama4:latest'
+                            if model_name not in MULTIMODAL_MODELS:
+                                resp = 'Llama4 does not support direct image input. Please use a multimodal model like LLaVA.'
+                            else:
+                                try:
+                                    image_b64 = run_llava_inference(filepath, OLLAMA_API_URL)
+                                    resp = image_b64
+                                except Exception as e:
+                                    resp = f"Error: {e}"
+                            span.set_attribute("llm.request", f"Image inference on {filename}")
+                            span.set_attribute("llm.response", resp)
+                        elif combo in ('img_gemini_flash', 'img_gemini_pro'):
+                            if not GEMINI_API_KEY:
+                                resp = 'Gemini API key not set.'
+                            else:
+                                # If TIFF, convert to PNG for Gemini
+                                ext = os.path.splitext(filepath)[1].lower()
+                                temp_png_path = None
+                                if ext in ['.tiff', '.tif']:
+                                    temp_png_path = convert_tiff_to_png(filepath)
+                                    image_path_for_gemini = temp_png_path
                                 else:
-                                    resp = f"Error: {response.text}"
-                                # Clean up temp PNG if created
-                                if temp_png_path and os.path.exists(temp_png_path):
-                                    os.remove(temp_png_path)
-                            except Exception as e:
-                                resp = f"Error: {e}"
-                    else:
-                        req = f"{combo} on {filename}"
-                        resp = "Not implemented."
-                    redis_cache.set(cache_key, json.dumps({'request': req, 'response': resp, 'filename': filename, 'combo': combo}))
+                                    image_path_for_gemini = filepath
+                                try:
+                                    mime_type = get_mime_type(image_path_for_gemini)
+                                    with open(image_path_for_gemini, 'rb') as img_file:
+                                        image_bytes = img_file.read()
+                                        image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                                    headers = {'Content-Type': 'application/json'}
+                                    params = {'key': GEMINI_API_KEY}
+                                    data = {
+                                        'contents': [
+                                            {
+                                                'parts': [
+                                                    {'text': 'Extract all fields and tables from this document as markdown.'},
+                                                    {'inlineData': {'mimeType': mime_type, 'data': image_b64}}
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                    api_url = GEMINI_FLASH_API_URL if combo == 'img_gemini_flash' else GEMINI_PRO_API_URL
+                                    response = requests.post(api_url, headers=headers, params=params, json=data)
+                                    label = combinations[[c[0] for c in combinations].index(combo)][1]
+                                    if response.ok:
+                                        try:
+                                            gemini_result = response.json()['candidates'][0]['content']['parts'][0]['text']
+                                        except Exception:
+                                            gemini_result = response.text
+                                        resp = gemini_result
+                                    else:
+                                        resp = f"Error: {response.text}"
+                                    # Clean up temp PNG if created
+                                    if temp_png_path and os.path.exists(temp_png_path):
+                                        os.remove(temp_png_path)
+                                except Exception as e:
+                                    resp = f"Error: {e}"
+                            span.set_attribute("llm.request", f"Image inference on {filename}")
+                            span.set_attribute("llm.response", resp)
+                        else:
+                            req = f"{combo} on {filename}"
+                            resp = "Not implemented."
+                            span.set_attribute("llm.request", req)
+                            span.set_attribute("llm.response", resp)
+                        trace_id = format(span.get_span_context().trace_id, 'x')
+                    # Store the actual request and response in cache
+                    redis_cache.set(cache_key, json.dumps({'request': req, 'response': resp, 'filename': filename, 'combo': combo, 'trace_id': trace_id}))
                 llm_requests[cache_key] = req
                 llm_responses[cache_key] = resp
-                results.append({'filename': filename, 'combo': combo, 'request': req, 'response': resp})
+                results.append({'filename': filename, 'combo': combo, 'request': req, 'response': resp, 'trace_id': trace_id})
         compare_keys = [f"{user_session_id}:{r['filename']}::{r['combo']}" for r in results]
     # Get dropdowns: collect all cache_keys for this POST
     left_sel = request.form.get('left_select')
@@ -367,6 +403,10 @@ def list_documents():
                     <pre style="background: #f0f0f0; padding: 1em; border-radius: 5px; white-space: pre-wrap;">{{ r.request }}</pre>
                     <h3>Parsed Response from LLM</h3>
                     <pre style="background: #f8f8f8; padding: 1em; border-radius: 5px; white-space: pre-wrap;">{{ r.response|safe }}</pre>
+                    {% if r.trace_id %}
+                        <h3>Trace ID</h3>
+                        <p>{{ r.trace_id }}</p>
+                    {% endif %}
                 </div>
             </div>
             <hr>
