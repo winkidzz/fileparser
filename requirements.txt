@@ -1,0 +1,7 @@
+flask
+langchain
+requests
+pillow
+tifffile
+pytesseract
+python-dotenv 
