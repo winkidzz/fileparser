@@ -169,8 +169,12 @@ def list_documents():
                 cached = redis_cache.get(cache_key)
                 if cached:
                     cached_obj = json.loads(cached)
-                    req, resp = cached_obj['request'], cached_obj['response']
+                    req = cached_obj.get('request', '')
+                    resp = cached_obj.get('response', '')
                     trace_id = cached_obj.get('trace_id')
+                    # Ensure request is always present in cache (backfill if missing)
+                    if not cached_obj.get('request'):
+                        redis_cache.set(cache_key, json.dumps({'request': req, 'response': resp, 'filename': filename, 'combo': combo, 'trace_id': trace_id}))
                 else:
                     req, resp, trace_id = '', '', None
                     with tracer.start_as_current_span(f"LLM-{combo}") as span:
@@ -407,6 +411,7 @@ def list_documents():
                         elif combo in ('img_gemini_flash', 'img_gemini_pro'):
                             if not GEMINI_API_KEY:
                                 resp = 'Gemini API key not set.'
+                                req = 'Gemini API key not set.'
                             else:
                                 # If TIFF, convert to PNG for Gemini
                                 ext = os.path.splitext(filepath)[1].lower()
@@ -428,11 +433,21 @@ def list_documents():
                                             {
                                                 'parts': [
                                                     {'text': 'Extract all fields and tables from this document as markdown.'},
-                                                    {'inlineData': {'mimeType': mime_type, 'data': image_b64}}
+                                                    {'inlineData': {'mimeType': mime_type, 'data': '[base64 omitted]'}}
                                                 ]
                                             }
                                         ]
                                     }
+                                    req_data = {
+                                        'model': combo,
+                                        'api_url': GEMINI_FLASH_API_URL if combo == 'img_gemini_flash' else GEMINI_PRO_API_URL,
+                                        'headers': headers,
+                                        'params': {**params, 'key': '***REDACTED***'},
+                                        'data': data
+                                    }
+                                    req = json.dumps(req_data, indent=2)
+                                    # Now set the actual data with the real base64 for the request
+                                    data['contents'][0]['parts'][1]['inlineData']['data'] = image_b64
                                     api_url = GEMINI_FLASH_API_URL if combo == 'img_gemini_flash' else GEMINI_PRO_API_URL
                                     response = requests.post(api_url, headers=headers, params=params, json=data)
                                     label = combinations[[c[0] for c in combinations].index(combo)][1]
@@ -449,7 +464,8 @@ def list_documents():
                                         os.remove(temp_png_path)
                                 except Exception as e:
                                     resp = f"Error: {e}"
-                            span.set_attribute("llm.request", f"Image inference on {filename}")
+                                    req = f"Error building Gemini request: {e}"
+                            span.set_attribute("llm.request", req)
                             span.set_attribute("llm.response", resp)
                         else:
                             req = f"{combo} on {filename}"
@@ -480,14 +496,18 @@ def list_documents():
     return render_template_string('''
         <style>
             body {
-                color: #111;
-                background: #fff;
+                color: #222;
+                background: #fafbfc;
             }
             pre, p, h2, h3, label, select, option, input, a {
-                color: #111 !important;
+                color: #222 !important;
             }
             pre {
                 background: #f8f8f8;
+            }
+            .scroll-section {
+                background: #fff;
+                color: #222;
             }
             /* Dark mode support */
             @media (prefers-color-scheme: dark) {
@@ -500,6 +520,10 @@ def list_documents():
                 }
                 pre {
                     background: #232323;
+                }
+                .scroll-section {
+                    background: #232323;
+                    color: #eee;
                 }
                 input, select, option {
                     background: #232323;
@@ -525,21 +549,25 @@ def list_documents():
         <hr>
         {% if results|length > 0 %}
             <h2>Document</h2>
-            <img src="/uploads/{{ results[0].filename }}" alt="Document Image" style="max-width: 100%; border: 1px solid #ccc;"/>
+            <div style="max-height: 500px; overflow-y: auto; border: 1px solid #ccc; border-radius: 5px; background: inherit; padding: 0.5em; display: flex; justify-content: center; align-items: center;">
+                <img src="/uploads/{{ results[0].filename }}" alt="Document Image" style="max-width: 100%; max-height: 480px; border: 1px solid #ccc; display: block; margin: 0 auto; background: #fff;"/>
+            </div>
             <hr>
         {% endif %}
         {% for r in results %}
             <h2>{{ r.filename }} - {{ r.combo }}</h2>
-            <div style="display: flex; gap: 2em;">
-                <div style="flex: 1;">
+            <div style="display: flex; flex-direction: column; gap: 1em; flex-wrap: wrap;">
+                <div style="flex: 1; min-width: 300px; max-height: 400px; overflow-y: auto; border: 1px solid #ccc; padding: 0.5em; border-radius: 5px; background: inherit; margin-bottom: 0.5em;">
                     <h3>Request Sent to LLM</h3>
-                    <pre style="background: inherit; padding: 1em; border-radius: 5px; white-space: pre-wrap;">{{ r.request }}</pre>
-                    <h3>Parsed Response from LLM</h3>
-                    <pre style="background: inherit; padding: 1em; border-radius: 5px; white-space: pre-wrap;">{{ r.response|safe }}</pre>
+                    <pre style="background: inherit; padding: 1em; border-radius: 5px; white-space: pre-wrap; max-height: 350px; overflow-y: auto;">{{ r.request }}</pre>
                     {% if r.trace_id %}
                         <h3>Trace ID</h3>
-                        <p>{{ r.trace_id }}</p>
+                        <p style="max-height: 50px; overflow-y: auto;">{{ r.trace_id }}</p>
                     {% endif %}
+                </div>
+                <div style="flex: 1; min-width: 300px; max-height: 400px; overflow-y: auto; border: 1px solid #ccc; padding: 0.5em; border-radius: 5px; background: inherit; margin-bottom: 0.5em;">
+                    <h3>Parsed Response from LLM</h3>
+                    <pre style="background: inherit; padding: 1em; border-radius: 5px; white-space: pre-wrap; max-height: 350px; overflow-y: auto;">{{ r.response|safe }}</pre>
                 </div>
             </div>
             <hr>
@@ -564,13 +592,13 @@ def list_documents():
             <input type="submit" value="Compare">
         </form>
         <div style="display: flex; gap: 2em;">
-            <div style="flex: 1;">
+            <div style="flex: 1; max-height: 400px; overflow-y: auto; border: 1px solid #ccc; padding: 0.5em; border-radius: 5px; background: inherit;">
                 <h3>Left Parsed Response</h3>
-                <pre style="background: inherit; padding: 1em; border-radius: 5px; white-space: pre-wrap;">{{ left_resp|safe }}</pre>
+                <pre style="background: inherit; padding: 1em; border-radius: 5px; white-space: pre-wrap; max-height: 350px; overflow-y: auto;">{{ left_resp|safe }}</pre>
             </div>
-            <div style="flex: 1;">
+            <div style="flex: 1; max-height: 400px; overflow-y: auto; border: 1px solid #ccc; padding: 0.5em; border-radius: 5px; background: inherit;">
                 <h3>Right Parsed Response</h3>
-                <pre style="background: inherit; padding: 1em; border-radius: 5px; white-space: pre-wrap;">{{ right_resp|safe }}</pre>
+                <pre style="background: inherit; padding: 1em; border-radius: 5px; white-space: pre-wrap; max-height: 350px; overflow-y: auto;">{{ right_resp|safe }}</pre>
             </div>
         </div>
         {% endif %}
